@@ -33,7 +33,7 @@ use warnings;
 use threads;
 use threads::shared;
 
-our $VERSION = sprintf "%d.%01d%02d", ('$Name: beta0_1_0 $' =~ /(p?\d+)/g), '';
+our $VERSION = sprintf "%d.%01d%02d", ('$Name: beta0_1_1 $' =~ /(p?\d+)/g), '';
 
 sub new {
     my $class = shift;

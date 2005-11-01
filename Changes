@@ -1,7 +1,15 @@
 Revision history for Perl extension Thread::Barrier.
 
+0.2.00  1 November 2005
+    - Switched to a hash-based implementation for clarity.
+    - The wait() method now resets the state after unblocking the waiting
+      threads.
+    - Fixed init() method to check for barrier-release condition after it
+      updates the threshold.
+    - Fixed the race condition in t/wait.t and added another variety of test.
+
 0.1.01  9 March 2003
-        - Modified Makefile.PL to break if ithreads not available.
+    - Modified Makefile.PL to break if ithreads not available.
 
 0.1.00  16 November 2002
 	- Initial release.

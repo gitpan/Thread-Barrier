@@ -1,13 +1,13 @@
 ###########################################################################
-# $Id: Barrier.pm,v 1.7 2005/11/01 20:10:11 wendigo Exp $
+# $Id: Barrier.pm,v 1.9 2007/03/25 08:20:07 wendigo Exp $
 ###########################################################################
 #
 # Barrier.pm
 #
-# RCS Revision: $Revision: 1.7 $
-# Date: $Date: 2005/11/01 20:10:11 $
+# RCS Revision: $Revision: 1.9 $
+# Date: $Date: 2007/03/25 08:20:07 $
 #
-# Copyright 2002, 2005 Mark Rogaski, mrogaski@cpan.org
+# Copyright 2002-2003, 2005, 2007 Mark Rogaski, mrogaski@cpan.org
 #
 # See the README file included with the
 # distribution for license information.
@@ -22,9 +22,12 @@ use warnings;
 
 use threads;
 use threads::shared;
-use Carp;
 
-our $VERSION = '0.201';
+our $VERSION = '0.300';
+
+###########################################################################
+# Public Methods
+###########################################################################
 
 #
 # new - creates a new Thread::Barrier object
@@ -40,23 +43,26 @@ our $VERSION = '0.201';
 #
 sub new {
     my $class       = shift;
-    my $threshold   = shift || 0;
 
-    # quick check for a nonnegative integer
-    confess "invalid argument supplied" if $threshold =~ /[^0-9]/;
+    my $self = &share({});
+    bless $self, $class;
 
-    my %self : shared;
-    %self = (
-        threshold   => $threshold,
-        count       => 0
+    %$self = (
+        threshold   => 0, # threads required to release barrier
+        count       => 0, # number of threads blocking on barrier
+        generation  => 0, # incremented when barrier is released
     );
 
-    bless \%self, $class;
+    $self->set_threshold(shift) if @_; # may die
+
+    return $self;
 }
 
 
 #
 # init - set the threshold value for the barrier
+#
+# *** DEPRECATED ***
 #
 # Arguments:
 #
@@ -68,28 +74,7 @@ sub new {
 #
 sub init {
     my($self, $threshold) = @_;
-
-    # make sure an argument was passed
-    confess "no argument supplied" unless defined $threshold;
-
-    # verify that the argument is a nonnegative integer
-    confess "invalid argument supplied" if $threshold =~ /[^0-9]/;
-
-    {
-        #
-        # This could be called with threads already blocking,
-        # so we'll make sure we do appropriate locking.
-        #
-        lock $self;     
-        $self->{threshold} = $threshold;
-
-        if ($self->{threshold} <= $self->{count}) {
-            # release the barrier if enough threads are blocking
-            $self->{count} = 0;
-            cond_broadcast($self);
-        }
-    }
-
+    $self->set_threshold($threshold);
     return $threshold;
 }
 
@@ -101,18 +86,58 @@ sub init {
 #
 # none
 #
+# Returns true to one of threads released upon barrier reset, false to 
+# all others.
+#
 sub wait {
     my $self = shift;
     lock $self;
+
     $self->{count}++;
-    my $id = threads->self->tid;
-    if ($self->{threshold} > $self->{count}) {
-        cond_wait($self) while ($self->{count} && 
-                $self->{threshold} > $self->{count});
-    } else {
-        $self->{count} = 0;
-        cond_broadcast($self);
+
+    return 1 if $self->_try_release; # barrier reset and released
+
+    # otherwise block
+    my $gen = $self->{generation};
+    cond_wait($self) while $self->{generation} == $gen;
+
+    return;
+}
+
+
+#
+# set_threshold - adjust the barrier's threshold, possibly releasing it
+#                  if enough threads are blocking.
+#
+# Arguments:
+#
+# threshold
+#   Specifies the required number of threads that 
+#   must block on the barrier before it is released.
+# 
+# Returns true if barrier is released, false otherwise.
+#
+sub set_threshold {
+    my($self, $threshold) = @_;
+    my $err;
+
+    # validate threshold
+    for ($threshold) {
+        $err = "no argument supplied", last unless defined $_;
+        $err = "invalid argument supplied", last if /[^0-9]/;
     }
+    if ($err) {
+        require Carp;
+        $Carp::CarpLevel = 1;
+        Carp::confess($err);
+    }
+
+    # apply new threshold, possibly releasing barrier
+    lock $self;
+    $self->{threshold} = $threshold;
+
+    # check for release condition
+    $self->_try_release;
 }
 
 
@@ -135,6 +160,35 @@ sub count {
     return $self->{count};
 }
 
+
+###########################################################################
+# Private Methods
+###########################################################################
+
+#
+# _tr_release - release the barrier if a sufficient number of threads
+#               have reached the barrier.
+#
+# Arguments:
+#
+#   none
+# 
+# Returns true if barrier is released, false otherwise.
+#
+sub _try_release {
+    my $self = shift;
+    lock $self;
+
+    return undef if $self->{count} < $self->{threshold};
+
+    # reset barrier and release
+    $self->{generation}++;
+    $self->{count} = 0;
+    cond_broadcast($self);
+    return 1;
+}
+
+
 1;
 __END__
 
@@ -146,11 +200,14 @@ Thread::Barrier - thread execution barrier
 
   use Thread::Barrier;
 
-  my $b = new Thread::Barrier;
-
-  $b->init($thr_cnt);
+  my $br = Thread::Barrier->new($thr_cnt);
   
-  $b->wait;
+  $br->wait; 
+
+  if ($br->wait) }
+      # executed by only one released thread
+      ...
+  }
 
 =head1 ABSTRACT
 
@@ -160,9 +217,11 @@ Execution barrier for multiple threads.
 
 Thread barriers provide a mechanism for synchronization of multiple threads.
 All threads issuing a C<wait> on the barrier will block until the count
-of waiting threads meets some threshold value.  This mechanism proves quite
-useful in situations where processing progresses in stages and completion
-of the current stage by all threads is the entry criteria for the next stage.
+of waiting threads meets some threshold value.  When the threshold is met, the 
+threads will be released and the barrier reset, ready to be used again.  This 
+mechanism proves quite useful in situations where processing progresses in 
+stages and completion of the current stage by all threads is the entry 
+criteria for the next stage.
 
 =head1 METHODS
 
@@ -172,21 +231,28 @@ of the current stage by all threads is the entry criteria for the next stage.
 
 =item new COUNT
 
-C<new> creates a new barrier and initializes the threshold count to C<NUMBER>.
-If C<NUMBER> is not specified, the threshold is set to 0.
+C<new> creates a new barrier and initializes the threshold count to C<COUNT>.
+If C<COUNT> is not specified, the threshold is set to 0.
 
-=item init COUNT
+=item set_threshold COUNT
 
-C<init> specifies the threshold count for the barrier, must be zero or a
-positive integer.  If the value of C<COUNT> is less than or equal to the
-number of threads blocking on the barrier when C<init> is called, the barrier
-is released and reset.
+C<set_threshold> specifies the threshold count for the barrier, must be 
+zero or a positive integer.  If the value of C<COUNT> is less than or equal 
+to the number of threads blocking on the barrier when C<init> is called, the 
+barrier is released and reset.
+
+Returns true if the barrier is released during the adjustment, false
+otherwise.
 
 =item wait
 
 C<wait> causes the thread to block until the number of threads blocking on 
 the barrier meets the threshold.  When the blocked threads are released, the
-barrier is reset to its initial state.
+barrier is reset to its initial state and ready for re-use.
+
+This method returns a true value to one of the released threads, and false to
+any and all others.  Precisely which thread receives the true value is
+unspecified, however.
 
 =item threshold
 
@@ -203,9 +269,56 @@ method returns.>
 =back
 
 
+=head1 EXAMPLES
+
+The return code from C<wait> may be used to serialize a single-threaded 
+action upon release, executing the action only after all threads have 
+arrived at (and are released from) the barrier:
+
+    sub worker {            # Thr routine: threads->create(\&worker, ...)
+        my $br = shift;     # $br->isa('Thread::Barrier')
+
+        get_ready();
+
+        if ($br->wait) {
+            do_log("All ready");    # Called only once
+        }
+
+       do_work();
+    }
+
+Of course, the operating system may schedule the single-threaded action to
+occur at any time.  That is, in the example above, do_log() may run before,
+during or after other released threads' calls to do_work().  To further
+serialize this action to complete before peer threads do anything else,
+simply re-use the same barrier:
+
+    sub worker {
+        my $br = shift;
+
+        get_ready();
+
+        if ($br->wait) {
+            init_globals();     # Must run after all get_ready() 
+                                # calls complete
+        }
+
+        $br->wait;              # Prevents do_work() from running
+                                # before init_globals() finishes.
+        do_work();
+    }
+
+
 =head1 SEE ALSO
 
 L<perlthrtut>.
+
+
+=head1 NOTES
+
+Many thanks to Michael Pomraning for providing a workaround for a race
+condition in the C<wait()> method that also helped to clean up the code and
+for additional suggestions.
 
 
 =head1 AUTHOR
@@ -218,7 +331,8 @@ suggestions please send me an email message.
 
 =head1 COPYRIGHT AND LICENSE
 
-Copyright 2002-2003, 2005 by Mark Rogaski.
+Copyright 2002-2003, 2005, 2007 by Mark Rogaski, mrogaski@cpan.org;
+all rights reserved.
 
 This program is free software; you can redistribute it and/or modify it
 under the same terms as Perl itself.

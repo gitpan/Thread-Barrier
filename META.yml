@@ -21,4 +21,4 @@ requires:
   Carp: 0
   Test::More: 0
   threads::shared: 0
-version: 0.300_01
+version: 0.300_02
